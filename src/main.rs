@@ -229,7 +229,7 @@ impl<'a> State<'a> {
         chan.step = (freq << FP_SHIFT) / self.sample_rate;
         let volume = chan.volume as i32 + chan.tremolo_add as i32;
         let volume = volume.clamp(0, 64);
-        chan.ampl = ((volume as i32 * self.gain as i32) >> 5) as u8;
+        chan.ampl = ((volume * self.gain as i32) >> 5) as u8;
     }
 
     fn tone_portamento(&mut self, chan: &mut Channel) {
@@ -312,6 +312,7 @@ impl<'a> State<'a> {
             let period = (channel.note.key as u32
                 * fine_tuning[(channel.fine_tune & 0xF) as usize] as u32)
                 >> 11;
+            channel.porta_period = ((period >> 1) + (period & 1)) as u16;
             if channel.note.effect != 0x3 && channel.note.effect != 0x5 {
                 channel.instrument = channel.assigned;
                 channel.period = period as u16;
