@@ -315,7 +315,7 @@ impl<'a> State<'a> {
             channel.porta_period = ((period >> 1) + (period & 1)) as u16;
             if channel.note.effect != 0x3 && channel.note.effect != 0x5 {
                 channel.instrument = channel.assigned;
-                channel.period = period as u16;
+                channel.period = channel.porta_period;
                 channel.sample_idx = channel.sample_offset << FP_SHIFT;
                 if channel.vibrato_type < 4 {
                     channel.vibrato_phase = 0;
