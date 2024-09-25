@@ -16,6 +16,7 @@ struct Note {
     param: u8,
 }
 
+#[derive(Default)]
 struct Instrument<'a> {
     volume: u8,
     fine_tune: u8,
@@ -134,7 +135,7 @@ impl<'a> State<'a> {
         let num_patterns = calculate_num_patterns(data);
         let mut sample_data_offset =
             1084 + num_patterns as usize * 64 * num_channels as usize * 4;
-        let mut instruments = vec![];
+        let mut instruments = vec![Instrument::default()];
         for i in 1..32 {
             let i = i * 30;
             let sample_length = 2 * u16::from_be_bytes(
@@ -168,8 +169,7 @@ impl<'a> State<'a> {
                 fine_tune,
                 loop_start,
                 loop_length,
-                sample_data: &data
-                    [sample_data_offset..sample_data_offset + sample_length],
+                sample_data: &data[sample_data_offset..],
             });
             sample_data_offset += sample_length;
         }
@@ -232,20 +232,20 @@ impl<'a> State<'a> {
     }
 
     fn tone_portamento(&mut self, chan: &mut Channel) {
-        let mut source = chan.period;
-        let dest = chan.porta_period;
+        let mut source = chan.period as u32;
+        let dest = chan.porta_period as u32;
         if source < dest {
-            source += chan.porta_speed as u16;
+            source += chan.porta_speed as u32;
             if source > dest {
                 source = dest;
             }
         } else if source > dest {
-            source = source.wrapping_sub(chan.porta_speed as u16);
+            source = source.wrapping_sub(chan.porta_speed as u32);
             if source < dest {
                 source = dest;
             }
         }
-        chan.period = source;
+        chan.period = source as u16;
     }
 
     fn volume_slide(&mut self, chan: &mut Channel, param: u8) {
@@ -254,7 +254,7 @@ impl<'a> State<'a> {
         chan.volume = volume.clamp(0, 64) as u8;
     }
 
-    fn waveform(&mut self, phase: u8, type_: u8) -> i32 {
+    fn waveform(&mut self, phase: i32, type_: i32) -> i32 {
         match type_ & 0x3 {
             0 => {
                 let amplitude = sine_table[(phase & 0x1F) as usize] as i32;
@@ -277,21 +277,21 @@ impl<'a> State<'a> {
 
     fn vibrato(&mut self, chan: &mut Channel) {
         chan.vibrato_add = (self
-            .waveform(chan.vibrato_phase, chan.vibrato_type)
+            .waveform(chan.vibrato_phase as i32, chan.vibrato_type as i32)
             * chan.vibrato_depth as i32
             >> 7) as i8;
     }
 
     fn tremolo(&mut self, chan: &mut Channel) {
         chan.tremolo_add = (self
-            .waveform(chan.tremolo_phase, chan.tremolo_type)
+            .waveform(chan.tremolo_phase as i32, chan.tremolo_type as i32)
             * chan.tremolo_depth as i32
             >> 6) as i8;
     }
 
     fn trigger(&mut self, channel: &mut Channel) {
         let ins = channel.note.instrument;
-        if (1..31).contains(&ins) {
+        if (1..32).contains(&ins) {
             channel.assigned = ins;
             channel.sample_offset = 0;
             channel.fine_tune = self.instruments[ins as usize].fine_tune;
@@ -399,10 +399,10 @@ impl<'a> State<'a> {
                 }
             }
             0x11 => {
-                chan.period = chan.period.saturating_sub(param as u16);
+                chan.period = chan.period.wrapping_sub(param as u16);
             }
             0x12 => {
-                chan.period = chan.period.saturating_add(param as u16);
+                chan.period = chan.period.wrapping_add(param as u16);
             }
             0x14 => {
                 if param < 8 {
@@ -437,7 +437,7 @@ impl<'a> State<'a> {
                 chan.volume = (chan.volume + param).clamp(0, 64);
             }
             0x1B => {
-                chan.volume = (chan.volume - param).clamp(0, 64);
+                chan.volume = (chan.volume.saturating_sub(param)).clamp(0, 64);
             }
             0x1C => {
                 if param <= 0 {
@@ -458,10 +458,10 @@ impl<'a> State<'a> {
         chan.fx_count += 1;
         match effect {
             0x1 => {
-                chan.period = chan.period.saturating_sub(param as u16);
+                chan.period = chan.period.wrapping_sub(param as u16);
             }
             0x2 => {
-                chan.period = chan.period.saturating_add(param as u16);
+                chan.period = chan.period.wrapping_add(param as u16);
             }
             0x3 => {
                 self.tone_portamento(chan);
@@ -475,12 +475,14 @@ impl<'a> State<'a> {
                 self.volume_slide(chan, param);
             }
             0x6 => {
-                chan.vibrato_phase += chan.vibrato_speed;
+                chan.vibrato_phase =
+                    chan.vibrato_phase.wrapping_add(chan.vibrato_speed);
                 self.vibrato(chan);
                 self.volume_slide(chan, param);
             }
             0x7 => {
-                chan.tremolo_phase += chan.tremolo_speed;
+                chan.tremolo_phase =
+                    chan.tremolo_phase.wrapping_add(chan.tremolo_speed);
                 self.tremolo(chan);
             }
             0xA => {
@@ -603,7 +605,7 @@ impl<'a> State<'a> {
         let llen = self.instruments[chan.instrument as usize].loop_length;
         let lep1 = self.instruments[chan.instrument as usize].loop_start + llen;
         let sdat = self.instruments[chan.instrument as usize].sample_data;
-        let mut ampl = if chan.mute { 0 } else { chan.ampl };
+        let mut ampl: i16 = if chan.mute { 0 } else { chan.ampl as i16 };
         let lamp = ampl as usize * (127 - chan.panning as usize) >> 5;
         let ramp = ampl as usize * chan.panning as usize >> 5;
         while buf_idx < buf_end {
@@ -624,10 +626,10 @@ impl<'a> State<'a> {
                 }
                 if lamp != 0 && ramp != 0 {
                     while sidx < epos as u32 {
-                        ampl = sdat[sidx as usize >> FP_SHIFT];
-                        buf[buf_idx] += ampl as i16 * lamp as i16 >> 2;
+                        ampl = sdat[sidx as usize >> FP_SHIFT] as i16 - 127;
+                        buf[buf_idx] += ampl * lamp as i16 / 2;
                         buf_idx += 1;
-                        buf[buf_idx] += ampl as i16 * ramp as i16 >> 2;
+                        buf[buf_idx] += ampl * ramp as i16 / 2;
                         buf_idx += 1;
                         sidx += step;
                     }
@@ -636,12 +638,10 @@ impl<'a> State<'a> {
                         buf_idx += 1;
                     }
                     while sidx < epos as u32 {
-                        let sample = buf[buf_idx] = buf[buf_idx]
-                            .saturating_add(
-                                (sdat[sidx as usize >> FP_SHIFT] as i32 + 255)
-                                    .saturating_mul(ampl as i32)
-                                    as i16,
-                            );
+                        buf[buf_idx] = buf[buf_idx].saturating_add(
+                            (sdat[sidx as usize >> FP_SHIFT] as i16 - 127)
+                                .saturating_mul(ampl),
+                        );
                         buf_idx += 2;
                         sidx += step;
                     }
@@ -722,8 +722,10 @@ impl<'a> State<'a> {
 }
 
 fn main() {
-    let module =
-        std::fs::read("C:/Users/aspizu/Music/Mods/mod/back_again.mod").unwrap();
+    let module = std::fs::read(
+        "C:/Users/aspizu/Music/Mods/mod/radix-rainy_summerdays.mod",
+    )
+    .unwrap();
     let (mut state, mut channels) = State::new(&module, 44100).unwrap();
     println!("num_channels: {}", state.num_channels);
     println!("song_length: {}", state.song_length);
