@@ -19,8 +19,8 @@ struct Note {
 struct Instrument<'a> {
     volume: u8,
     fine_tune: u8,
-    loop_start: u16,
-    loop_length: u16,
+    loop_start: u32,
+    loop_length: u32,
     sample_data: &'a [u8],
 }
 
@@ -137,20 +137,19 @@ impl<'a> State<'a> {
         let mut instruments = vec![];
         for i in 1..32 {
             let i = i * 30;
-            let sample_length =
-                u16::from_be_bytes(data[i + 12..i + 14].try_into().unwrap())
-                    as usize
-                    * 2;
+            let sample_length = 2 * u16::from_be_bytes(
+                data[i + 12..i + 14].try_into().unwrap(),
+            ) as usize;
             let fine_tune = data[i + 14] & 0x7F;
             let fine_tune = (fine_tune & 0x7) - (fine_tune & 0x8) + 8;
             let volume = data[i + 15] & 0x7F;
             let volume = volume.min(64);
-            let mut loop_start =
-                u16::from_be_bytes(data[i + 16..i + 18].try_into().unwrap())
-                    as usize;
-            let mut loop_length =
-                u16::from_be_bytes(data[i + 18..i + 20].try_into().unwrap())
-                    as usize;
+            let mut loop_start = 2 * u16::from_be_bytes(
+                data[i + 16..i + 18].try_into().unwrap(),
+            ) as usize;
+            let mut loop_length = 2 * u16::from_be_bytes(
+                data[i + 18..i + 20].try_into().unwrap(),
+            ) as usize;
             if loop_start + loop_length > sample_length {
                 if loop_start / 2 + loop_length <= sample_length {
                     loop_start = loop_start / 2;
@@ -162,8 +161,8 @@ impl<'a> State<'a> {
                 loop_start = sample_length;
                 loop_length = 0;
             }
-            let loop_start = (loop_start << FP_SHIFT) as u16;
-            let loop_length = (loop_length << FP_SHIFT) as u16;
+            let loop_start = (loop_start << FP_SHIFT) as u32;
+            let loop_length = (loop_length << FP_SHIFT) as u32;
             instruments.push(Instrument {
                 volume,
                 fine_tune,
@@ -241,7 +240,7 @@ impl<'a> State<'a> {
                 source = dest;
             }
         } else if source > dest {
-            source -= chan.porta_speed as u16;
+            source = source.wrapping_sub(chan.porta_speed as u16);
             if source < dest {
                 source = dest;
             }
@@ -292,7 +291,7 @@ impl<'a> State<'a> {
 
     fn trigger(&mut self, channel: &mut Channel) {
         let ins = channel.note.instrument;
-        if (1..32).contains(&ins) {
+        if (1..31).contains(&ins) {
             channel.assigned = ins;
             channel.sample_offset = 0;
             channel.fine_tune = self.instruments[ins as usize].fine_tune;
@@ -468,7 +467,8 @@ impl<'a> State<'a> {
                 self.tone_portamento(chan);
             }
             0x4 => {
-                chan.vibrato_phase += chan.vibrato_speed;
+                chan.vibrato_phase =
+                    chan.vibrato_phase.wrapping_add(chan.vibrato_speed);
             }
             0x5 => {
                 self.tone_portamento(chan);
@@ -575,16 +575,17 @@ impl<'a> State<'a> {
     }
 
     fn sequence_tick(&mut self, channels: &mut Vec<Channel>) -> i32 {
+        let mut song_end = 0;
         self.tick -= 1;
         if self.tick <= 0 {
             self.tick = self.speed as i32;
-            self.sequence_row(channels)
+            song_end = self.sequence_row(channels);
         } else {
             for i in 0..self.num_channels as usize {
                 self.channel_tick(&mut channels[i])
             }
-            0
         }
+        song_end
     }
 
     fn resample(
@@ -602,12 +603,12 @@ impl<'a> State<'a> {
         let llen = self.instruments[chan.instrument as usize].loop_length;
         let lep1 = self.instruments[chan.instrument as usize].loop_start + llen;
         let sdat = self.instruments[chan.instrument as usize].sample_data;
-        let mut ampl = if !chan.mute { chan.ampl } else { 0 };
+        let mut ampl = if chan.mute { 0 } else { chan.ampl };
         let lamp = ampl as usize * (127 - chan.panning as usize) >> 5;
         let ramp = ampl as usize * chan.panning as usize >> 5;
         while buf_idx < buf_end {
             if sidx >= lep1 as u32 {
-                if llen <= FP_ONE as u16 {
+                if llen <= FP_ONE {
                     sidx = lep1 as u32;
                     break;
                 }
@@ -635,8 +636,12 @@ impl<'a> State<'a> {
                         buf_idx += 1;
                     }
                     while sidx < epos as u32 {
-                        buf[buf_idx] += sdat[sidx as usize >> FP_SHIFT] as i16
-                            * ampl as i16;
+                        let sample = buf[buf_idx] = buf[buf_idx]
+                            .saturating_add(
+                                (sdat[sidx as usize >> FP_SHIFT] as i32 + 255)
+                                    .saturating_mul(ampl as i32)
+                                    as i16,
+                            );
                         buf_idx += 2;
                         sidx += step;
                     }
@@ -689,13 +694,13 @@ impl<'a> State<'a> {
         &mut self,
         channels: &mut Vec<Channel>,
         output_buffer: &mut [i16],
-        mut count: usize,
     ) {
         output_buffer.fill(0);
         if self.num_channels <= 0 {
             return;
         }
         let mut offset = 0;
+        let mut count = output_buffer.len() / 2;
         while count > 0 {
             let mut remain = self.tick_len - self.tick_offset;
             if remain > count as u32 {
@@ -739,7 +744,7 @@ fn main() {
     state.set_position(&mut channels, 0);
     for _ in 0..100 {
         let mut buffer = [0; 44100 * 2];
-        state.get_audio(&mut channels, &mut buffer, 1024);
+        state.get_audio(&mut channels, &mut buffer);
         for sample in buffer {
             writer.write_all(sample.to_le_bytes().as_slice()).unwrap();
         }
